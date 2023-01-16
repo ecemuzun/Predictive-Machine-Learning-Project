@@ -1,0 +1,858 @@
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, include=TRUE, eval=FALSE, warning=FALSE, message=FALSE)
+options(java.parameters = c("-XX:+UseConcMarkSweepGC", "-Xmx12000m"))
+library(RSQLite)
+library(dplyr)
+library(tidyverse)
+library(data.table)
+library(emmeans)
+library(stringr)
+library(gridExtra)
+library(MASS)
+library(mice)
+library(mltools)
+library(FactoMineR)
+library(plyr)
+library(ROSE)
+library(corrplot)
+library(ppclust)
+library(cluster)
+library(flashClust)
+library(factoextra)
+library(FSelector)
+library(caTools)
+library(e1071)
+library(caret)
+library(caretEnsemble)
+library(Amelia)
+library(Hmisc)
+library(stargazer)
+library(utils)
+```
+
+# Building the connection
+```{r eval = FALSE}
+ncm_data_files <- list.files("./Data/")
+
+for (file in ncm_data_files) {
+  file_path <- paste0("./Data/", file)
+  file_contents <- fread(file_path)
+  
+  table_name <- gsub(".csv", "", file)
+  
+  RSQLite::dbWriteTable(for_connection, table_name, file_contents, overwrite = TRUE)
+}
+
+RSQLite::dbListTables(for_connection)
+```
+
+# Reading the datasets to the database
+```{r}
+impression_data <- dbGetQuery(for_connection, "SELECT *
+                                                FROM impression_data")
+
+creator_demographics <- dbGetQuery(for_connection, "SELECT *
+                                                    FROM creator_demographics")
+
+mlog_demographics <- dbGetQuery(for_connection, "SELECT *
+                                                 FROM mlog_demographics")
+
+user_demographics <- dbGetQuery(for_connection, "SELECT *
+                                                 FROM user_demographics")
+
+fwrite(impression_data, "impression_data_og.csv")
+fwrite(creator_demographics, "creator_demographics_og.csv")
+fwrite(mlog_demographics, "mlog_demographics_og.csv")
+fwrite(user_demographics, "user_demographics_og.csv")
+
+RSQLite::dbDisconnect(for_connection)
+```
+
+# Reading the datasets to the environment
+```{r}
+impression_data <- read_csv("impression_data_og.csv")
+creator_demographics <- read_csv("creator_demographics_og.csv")
+mlog_demographics <- read_csv("mlog_demographics_og.csv")
+user_demographics <- read_csv("user_demographics_og.csv")
+
+# To read faster
+saveRDS(impression_data, "impression_data_og.rds")
+saveRDS(creator_demographics, "creator_demographics_og.rds")
+saveRDS(mlog_demographics, "mlog_demographics_og.rds")
+saveRDS(user_demographics, "user_demographics_og.rds")
+
+impression_data <- readRDS("impression_data_og.rds")
+mlog_demographics <- readRDS("mlog_demographics_og.rds")
+creator_demographics <- readRDS("creator_demographics_og.rds")
+user_demographics <- readRDS("user_demographics_og.rds")
+```
+
+# Validating the datasets with data dictionary
+```{r}
+# Removing excess users from impressions table
+a <- impression_data %>% group_by(userId) %>% dplyr::summarise(Total_users1 = n())
+b <- a %>% dplyr::summarise(total_users = n())
+
+c <- user_demographics %>% group_by(userId) %>% dplyr::summarise(Total_users2 = n())
+d <- c %>% dplyr::summarise(total_users = n())
+
+e <- a %>% left_join(c, by = "userId")
+(e %>% dplyr::summarise(total_users = n()))
+
+unknown_user <- e %>% filter(is.na(Total_users2))
+unknown_user <- unknown_user %>% dplyr::select(userId)
+
+impression_data <- impression_data %>% filter(!(userId %in% unknown_user$userId))
+```
+
+# Checking distributions
+```{r}
+# User data
+ggplot(user_demographics, aes(gender)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Gender in User Demographics Dataset", xlab = "gender", ylab = "Count")
+ggplot(user_demographics, aes(province)) + geom_histogram(stat = "count") + theme(axis.text.x = element_text(angle = 90)) +
+  labs(title = "Distribution of Province in User Demographics Dataset", xlab = "province", ylab = "Count")
+ggplot(user_demographics, aes(age)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Age in User Demographics Dataset", xlab = "age", ylab = "Count")
+ggplot(user_demographics, aes(level)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Level in User Demographics Dataset", xlab = "level", ylab = "Count")
+ggplot(user_demographics, aes(followCnt)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Follow Count in User Demographics Dataset", xlab = "followCnt", ylab = "Count")
+ggplot(user_demographics, aes(registeredMonthCnt)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Registered Month Count in User Demographics Dataset", xlab = "registeredMonthCnt", ylab = "Count")
+
+# Impression data
+boxplot(impression_data$mlogViewTime, main = "Distribution of mlogViewTime in Impression Dataset", xlab = "mlogViewTime", ylab = "Count") 
+ggplot(impression_data, aes(isClick)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of isClick in Impression Dataset", xlab = "isClick", ylab = "Count")
+ggplot(impression_data, aes(isComment)) + geom_histogram(stat = "count") +
+  labs(title = "Distribution of isComment in Impression Dataset", xlab = "isComment", ylab = "Count")
+ggplot(impression_data, aes(isIntoPersonalHomepage)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of isIntoPersonalHomepage in Impression Dataset", xlab = "isIntoPersonalHomepage", ylab = "Count")
+ggplot(impression_data, aes(isShare)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of isShare in Impression Dataset", xlab = "isShare", ylab = "Count")
+ggplot(impression_data, aes(isViewComment)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of isViewComment in Impression Dataset", xlab = "isViewComment", ylab = "Count")
+ggplot(impression_data, aes(isLike)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of isLike in Impression Dataset", xlab = "isLike", ylab = "Count")
+
+# Creator data
+ggplot(creator_demographics, aes(gender)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Gender in Creator Demographics Dataset", xlab = "gender", ylab = "Count")
+ggplot(creator_demographics, aes(registeredMonthCnt)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Registered Month Count in Creator Demographics Dataset", xlab = "registeredMonthCnt", ylab = "Count")
+ggplot(creator_demographics, aes(creatorType)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Creator Type in Creator Demographics Dataset", xlab = "creatorType", ylab = "Count")
+ggplot(creator_demographics, aes(level)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Level in Creator Demographics Dataset", xlab = "level", ylab = "Count")
+
+# Card data
+ggplot(mlog_demographics, aes(publishTime)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Publish Time in Card Demographics Dataset", xlab = "publishTime", ylab = "Count")
+ggplot(mlog_demographics, aes(type)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Type in Card Demographics Dataset", xlab = "type", ylab = "Count")
+```
+
+# Preprocessing
+```{r}
+# Removing outliers - User demographics
+outliers <- which(user_demographics$age >= 40)
+user_demographics <- user_demographics[-outliers,]
+outliers <- which(user_demographics$followCnt >= 200)
+user_demographics <- user_demographics[-outliers,]
+
+# NA - User demographics
+user_demographics <- user_demographics %>% mutate_all(na_if, "")
+user_demographics <- user_demographics %>% mutate_all(na_if, "unknown")
+colSums(is.na(user_demographics))
+view(user_demographics %>% filter(is.na(level)))
+user_demographics <- user_demographics %>% drop_na(level)
+
+missmap(user_demographics)
+mice_mod <- mice(user_demographics[, c("age", "level", "followCnt", "registeredMonthCnt")], method = "rf")
+saveRDS(mice_mod, "mice_mod.rds")
+mice_mod <- readRDS("mice_mod.rds")
+na_complete <- complete(mice_mod)
+user_demographics$age <- na_complete$age
+
+# NA - Creator demographics
+creator_demographics <- creator_demographics %>% mutate_all(na_if, "")
+creator_demographics <- creator_demographics %>% mutate_all(na_if, "unknown")
+colSums(is.na(creator_demographics))
+
+# Removing outliers - Impressions
+outliers <- which(impression_data$mlogViewTime >= 10000)
+impression_data <- impression_data[-outliers,]
+outliers <- which(impression_data$mlogViewTime < 0)
+impression_data <- impression_data[-outliers,]
+```
+
+# Preprocessing
+```{r}
+# Getting swipe count
+json <- impression_data %>% dplyr::select(detailMlogInfoList)
+json$swipeCnt <- str_count(json$detailMlogInfoList, "\\}")
+impression_data <- cbind(impression_data, json$swipeCnt)
+names(impression_data)[names(impression_data) == "json$swipeCnt"] <- "swipeCnt"
+impression_data$detailMlogInfoList <- NULL
+impression_data$swipeCnt <- replace_na(impression_data$swipeCnt, 0)
+impression_data <- impression_data %>% mutate(isSwipe = ifelse(swipeCnt > 0, 1, 0))
+impression_data$swipeCnt <- NULL
+
+# Removing redundant variables
+impression_data <- impression_data[, -c(2:3)]
+
+ggplot(impression_data, aes(isSwipe)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of isSwipe in Impression Dataset", xlab = "isSwipe", ylab = "Count")
+
+saveRDS(impression_data, "impression_data.rds")
+saveRDS(user_demographics, "user_demographics.rds")
+saveRDS(mlog_demographics, "mlog_demographics.rds")
+saveRDS(creator_demographics, "creator_demographics.rds")
+```
+
+# Getting master table
+```{r}
+impression_data <- readRDS("impression_data.rds")
+user_demographics <- readRDS("user_demographics.rds")
+creator_demographics <- readRDS("creator_demographics.rds")
+mlog_demographics <- readRDS("mlog_demographics.rds")
+
+# Getting user data
+master_data <- impression_data %>% inner_join(user_demographics, by = "userId")
+names(master_data)[names(master_data) == "level"] <- "userLevel"
+names(master_data)[names(master_data) == "gender"] <- "userGender"
+names(master_data)[names(master_data) == "registeredMonthCnt"] <- "userRegisteredMonthCnt"
+
+# Getting mlog data
+master_data <- master_data %>% left_join(mlog_demographics, by = "mlogId")
+
+# Getting creator data
+master_data <- master_data %>% left_join(creator_demographics, by = "creatorId")
+names(master_data)[names(master_data) == "level"] <- "creatorLevel"
+names(master_data)[names(master_data) == "gender"] <- "creatorGender"
+names(master_data)[names(master_data) == "registeredMonthCnt"] <- "creatorRegisteredMonthCnt"
+
+saveRDS(master_data, "master_data.rds")
+```
+
+# Cleaning the master table to prepare final dataset for modelling
+```{r}
+master_data <- readRDS("master_data.rds")
+
+# Filtering
+master_data[, c("mlogId", "songId", "artistId", "creatorId", "talkId")] <- NULL
+colSums(is.na(master_data))
+view(master_data %>% filter(is.na(contentId)))
+na_data <- which(is.na(master_data$contentId))
+master_data <- master_data[-na_data,]
+
+# Getting modelling data
+na_data <- which(is.na(master_data$mlogViewTime))
+data_for_modelling <- master_data[-na_data,]
+
+# Separate contentId into rows
+data_for_modelling$contentId <- data_for_modelling$contentId %>% str_replace_all(",", "")
+data_for_modelling$contentId <- data_for_modelling$contentId %>% as.numeric(.)
+
+# Encoding factors
+data_for_modelling$userGender <- revalue(data_for_modelling$userGender, c("male" = "0", "female" = "1"))
+data_for_modelling$userGender <- as.numeric(data_for_modelling$userGender)
+data_for_modelling$creatorGender <- revalue(data_for_modelling$creatorGender, c("male" = "0", "female" = "1"))
+data_for_modelling$creatorGender <- as.numeric(data_for_modelling$creatorGender)
+
+# Removing duplicates
+data_for_modelling <- distinct(data_for_modelling)
+
+saveRDS(data_for_modelling, "data_for_modelling.rds")
+```
+
+# Recency
+```{r}
+data_for_modelling <- readRDS("data_for_modelling.rds")
+data_for_rfe <- data_for_modelling
+data_for_rfe <- data_for_rfe %>% mutate(recency = max(dt) - dt)
+
+ggplot(data_for_rfe, aes(recency)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Recency", xlab = "Recency", ylab = "Count")
+
+data_for_rfe <- data_for_rfe %>% mutate(recency_scaled = (recency - min(recency))/(max(recency) - min(recency)))
+
+data_for_rfe %>% ggplot(aes(recency_scaled))+
+                  geom_freqpoly() +
+                  theme_classic() +
+                  ggtitle("Recency Scaled")
+
+# Scree plot for recency
+wss <- 0
+
+set.seed(123)
+for(i in 1:10){
+  km.out <- kmeans(data_for_rfe$recency_scaled, centers = i, nstart = 25)
+  wss[i] <- km.out$withinss
+  
+  print(i)
+}
+
+plot(wss, type = "b", xlab = "Number of Clusters", ylab = "Within groups sum of squares", main = "Recency Scree Plot")
+
+set.seed(123)
+kmeans_rec = kmeans(data_for_rfe$recency_scaled, centers = 3, nstart = 25)
+data_for_rfe$recency_cluster = kmeans_rec$cluster
+```
+
+# Frequency
+```{r}
+get_users <- data_for_rfe %>% group_by(userId) %>% dplyr::summarise(frequency = n())
+data_for_rfe <- data_for_rfe %>% left_join(get_users, by = "userId")
+
+ggplot(data_for_rfe, aes(frequency)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Frequency", xlab = "Frequency", ylab = "Count")
+
+data_for_rfe <- data_for_rfe %>% mutate(frequency_scaled = (frequency - min(frequency))/(max(frequency) - min(frequency)))
+
+data_for_rfe %>% ggplot(aes(frequency_scaled))+
+                  geom_freqpoly() +
+                  theme_classic() +
+                  ggtitle("Frequency Scaled")
+
+# Scree plot for frequency
+wss <- 0
+
+set.seed(123)
+for(i in 1:10){
+  km.out <- kmeans(data_for_rfe$frequency_scaled, centers = i, nstart = 25)
+  wss[i] <- km.out$withinss
+  
+  print(i)
+}
+
+plot(wss, type = "b", xlab = "Number of Clusters", ylab = "Within groups sum of squares", main = "Frequency Scree Plot")
+
+set.seed(123)
+kmeans_freq = kmeans(data_for_rfe$frequency_scaled, centers = 3, nstart = 25)
+data_for_rfe$frequency_cluster = kmeans_freq$cluster
+```
+
+# Engagement
+```{r}
+data_for_rfe <- data_for_rfe %>% mutate(engagement = dplyr::select(data_for_rfe,
+                                                             isClick,
+                                                             isComment,
+                                                             isIntoPersonalHomepage,
+                                                             isShare,
+                                                             isViewComment,
+                                                             isLike,
+                                                             isSwipe,
+                                                             mlogViewTime) %>%
+                                             rowSums(.))
+
+ggplot(data_for_rfe, aes(engagement)) + geom_histogram(bins = 500) + 
+  labs(title = "Distribution of Engagement", xlab = "Frequency", ylab = "Count")
+
+data_for_rfe <- data_for_rfe %>% mutate(engagement_scaled = (engagement - min(engagement))/(max(engagement) - min(engagement)))
+
+data_for_rfe %>% ggplot(aes(engagement_scaled))+
+                  geom_freqpoly() +
+                  theme_classic() +
+                  ggtitle("Engagement")
+summary(data_for_rfe)
+
+# Scree plot engagement
+wss <- 0
+
+set.seed(123)
+for(i in 1:10){
+  km.out <- kmeans(data_for_rfe$engagement_scaled, centers = i, nstart = 25)
+  wss[i] <- km.out$withinss
+  
+  print(i)
+}
+
+plot(wss, type = "b", xlab = "Number of Clusters", ylab = "Within groups sum of squares", main = "Engagement Scree Plot")
+
+set.seed(123)
+kmeans_eng = kmeans(data_for_rfe$engagement_scaled, centers = 3, nstart = 25)
+data_for_rfe$engagement_cluster = kmeans_eng$cluster
+
+saveRDS(data_for_rfe, "data_for_rfe.rds")
+```
+
+# Overall Score
+```{r}
+data_for_rfe <- data_for_rfe %>% mutate(engagement_score = ifelse(engagement_cluster == 3, 2,
+                                                                         ifelse(engagement_cluster == 2, 3, 1)))
+
+data_for_rfe <- data_for_rfe %>% mutate(recency_score = ifelse(recency_cluster == 3, 2,
+                                                               ifelse(recency_cluster == 2, 3, 1)))
+
+data_for_rfe <- data_for_rfe %>% mutate(frequency_score = ifelse(frequency_cluster == 3, 3,
+                                                                 ifelse(frequency_cluster == 2, 1, 2)))
+
+data_for_rfe <- data_for_rfe %>% mutate(overall_score = dplyr::select(data_for_rfe,
+                                                                      engagement_score,
+                                                                      recency_score,
+                                                                      frequency_score) %>%
+                                          rowSums(.))
+
+saveRDS(data_for_rfe, "data_for_rfe.rds")
+```
+
+# Active User Classification
+```{r}
+get_user_score <- data_for_rfe %>% group_by(userId) %>% dplyr::summarise(userScore = sum(overall_score))
+data_for_rfe <- data_for_rfe %>% left_join(get_user_score, by = "userId")
+
+data_for_rfe <- data_for_rfe %>% mutate(isActive = ifelse(userScore <= mean(userScore), 0, 1))
+data_for_rfe$isActive <- as.factor(data_for_rfe$isActive)
+
+table(data_for_rfe$isActive)
+
+saveRDS(data_for_rfe, "data_for_rfe.rds")
+data_for_rfe <- readRDS("data_for_rfe.rds")
+```
+
+# Exploratory
+```{r}
+data_for_rfe <- readRDS("data_for_rfe.rds")
+
+data_for_glm <- data_for_rfe
+data_for_glm <- data_for_glm %>% na.omit(.)
+data_for_glm$userId <- NULL
+data_for_glm$userLevel <- NULL
+data_for_glm <- data_for_glm %>% dplyr::select(-c("recency_scaled", "recency_cluster", 
+                                                  "frequency_scaled", "frequency_cluster", 
+                                                  "engagement_scaled", "engagement_cluster", 
+                                                  "userScore"))
+
+# Distribution of numerical data
+ggplot(data_for_glm, aes(log(mlogViewTime))) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of mlogViewTime", xlab = "mlogViewTime", ylab = "Count")
+
+ggplot(data_for_glm, aes(age)) + geom_histogram(stat = "count") +
+  labs(title = "Distribution of User Age", xlab = "Age", ylab = "Count")
+
+ggplot(data_for_glm, aes(userRegisteredMonthCnt)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Registered Month Count of User", xlab = "userRegisteredMonthCnt", ylab = "Count")
+data_for_glm <- data_for_glm %>% filter(userRegisteredMonthCnt <= 100)
+
+ggplot(data_for_glm, aes(log(followCnt))) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Follow Count of User", xlab = "followCnt", ylab = "Count")
+
+ggplot(data_for_glm, aes(publishTime)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Publish Time of the Card", xlab = "publishTime", ylab = "Count")
+
+ggplot(data_for_glm, aes(creatorRegisteredMonthCnt)) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Registered Month Count of Creator", xlab = "creatorRegisteredMonthCnt", ylab = "Count")
+
+ggplot(data_for_glm, aes(log(follows))) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Follow Count of Creator", xlab = "Follows", ylab = "Count")
+
+ggplot(data_for_glm, aes(sqrt(followeds))) + geom_histogram(stat = "count") + 
+  labs(title = "Distribution of Followers of Creator", xlab = "Followers", ylab = "Count")
+
+data1 <- data_for_glm[1:50000, ]
+data2 <- data_for_glm[50001:100000, ]
+data3 <- data_for_glm[100001:150000, ]
+data4 <- data_for_glm[150001:200000, ]
+data5 <- data_for_glm[200001:250000, ]
+data6 <- data_for_glm[250001:300000, ]
+data7 <- data_for_glm[300001:350000, ]
+data8 <- data_for_glm[350001:400000, ]
+data9 <- data_for_glm[400001:450000, ]
+data10 <- data_for_glm[450001:500000, ]
+data11 <- data_for_glm[500001:553452, ]
+
+glm_model <- glm(isActive ~ ., family = "binomial", data = data1)
+glm_model <- update(glm_model, data = data2)
+glm_model <- update(glm_model, data = data3)
+glm_model <- update(glm_model, data = data4)
+glm_model <- update(glm_model, data = data5)
+glm_model <- update(glm_model, data = data6)
+glm_model <- update(glm_model, data = data7)
+glm_model <- update(glm_model, data = data8)
+glm_model <- update(glm_model, data = data9)
+glm_model <- update(glm_model, data = data10)
+glm_model <- update(glm_model, data = data11)
+
+saveRDS(glm_model, "glm_model.rds")
+glm_model <- readRDS("glm_model.rds")
+
+summary(glm_model)
+
+stargazer::stargazer(glm_model, type = "text", title = "GLM Summary Statistics", out = "glm_model.txt", single.row = T, align = T, flip = T)
+
+# Correlation matrix
+summary(data_for_glm)
+data_for_cor <- data_for_glm
+data_for_cor$isActive <- data_for_cor$isActive %>% as.numeric(.)
+cor_attr <- data_for_cor %>% dplyr::select(-c("province")) %>% cor(.) %>% data.frame(.)
+active <- data.frame(cor_attr$isActive)
+active$parameter <- row.names(cor_attr)
+names(active) <- c("Correlation", "Parameter")
+active
+
+# Visualisation of correlation plots, contrıbutıon plots, and PCA
+corrplot(cor(data_for_cor %>% dplyr::select(-c("province")), use = "complete.obs"), type = "upper", method = "ellipse", tl.cex=0.9)
+
+PCA(data_for_cor %>% dplyr::select(-c("province", "isActive", "dt", "engagement", "follows", "overall_score", "isShare", "isIntoPersonalHomepage", "contentId", "followeds", "creatorType", "creatorLevel", "engagement_score", "recency_score", "frequency_score")), scale.unit = TRUE, ncp = 5, graph = TRUE)
+
+result_pca <- PCA(data_for_cor %>% dplyr::select(-c("province", "isActive", "dt", "engagement", "follows", "overall_score", "isShare",
+                                                    "isIntoPersonalHomepage", "contentId", "followeds", "creatorType", "creatorLevel",
+                                                    "engagement_score", "recency_score", "frequency_score")), 
+                  scale.unit = TRUE, ncp = 5, graph = FALSE)
+print(result_pca)
+eigenvalue <- get_eigenvalue(result_pca)
+print(eigenvalue)
+fviz_eig(result_pca, addlabels = TRUE, ylim = c(0, 15), font.xt = 12)
+
+var_pca <- get_pca_var(result_pca)
+corrplot(var_pca$cos2, is.corr = FALSE)
+fviz_cos2(result_pca, choice = "var", axes = 1:2, font.xt = 12)
+
+corrplot(var_pca$contrib, is.corr = FALSE)
+fviz_contrib(result_pca, choice = "var", axes = 1, top = 10, font.xt = 12)
+fviz_contrib(result_pca, choice = "var", axes = 2, top = 10, font.xt = 12)
+
+modelling_data <- data_for_glm %>% dplyr::select(-c("dt", "engagement", "follows", "overall_score", "isShare", "isIntoPersonalHomepage",
+                                                    "contentId", "followeds", "creatorType", "creatorLevel", "engagement_score", 
+                                                    "recency_score", "frequency_score"))
+modelling_data_for_clusters <- data_for_glm %>% dplyr::select(-c("dt", "engagement", "follows", "overall_score", "isShare",
+                                                                 "isIntoPersonalHomepage", "contentId", "followeds", "creatorType",
+                                                                 "creatorLevel", "engagement_score", "recency_score", "frequency_score"))
+```
+
+# Balancing the data
+```{r}
+# Checking the structure
+str(modelling_data)
+
+# Encoding for province variable
+modelling_data$province <- as.factor(modelling_data$province)
+modelling_data <- one_hot(as.data.table(modelling_data), cols = "province")
+for(col in 7:41){
+    colnames(modelling_data)[col] <- sub(" ", "_", colnames(modelling_data)[col])
+    colnames(modelling_data)[col] <- sub(" ", "", colnames(modelling_data)[col])
+}
+
+# Test and training data
+set.seed(123)
+split = sample.split(modelling_data$isActive, SplitRatio = 0.70)
+training_data = subset(modelling_data, split == TRUE)
+test_data = subset(modelling_data, split == FALSE)
+
+# Balancing the data with 40% proportion
+prop.table(table(training_data$isActive)) * 100
+bothsampled <- ovun.sample(isActive ~ ., data = training_data, method = "both", p = 0.4, seed = 1)$data
+prop.table(table(bothsampled$isActive)) * 100
+
+saveRDS(modelling_data, "modelling_data.rds")
+saveRDS(modelling_data_for_clusters, "modelling_data_for_clusters.rds")
+saveRDS(bothsampled, "bothsampled.rds")
+```
+
+# Naive Bayes Model
+```{r}
+bothsampled <- readRDS("bothsampled.rds")
+
+# Modelling
+model_naive <- train(isActive~., data = bothsampled, method = "nb", 
+                     trControl = trainControl(method = "cv", number = 5))
+saveRDS(model_naive, "model_naive.rds")
+model_naive <- readRDS("model_naive.rds")
+plot(model_naive)
+
+# Evaluating
+predict_naive <- predict(model_naive, newdata = test_data)
+saveRDS(predict_naive, "predict_naive.rds")
+predict_naive <- readRDS("predict_naive.rds")
+
+# Attribute performance
+imp_attr_naive <- varImp(model_naive)
+plot(imp_attr_naive, main = "Variable Importance of Naive Bayes")
+
+# Confusion
+naive_cm <- table(test_data$isActive, predict_naive)
+confusionMatrix(naive_cm)
+
+# Looking at the predictions
+view(head(cbind(predict_naive, test_data), 20))
+```
+
+# K-Nearest Neighbour Model
+```{r}
+model_knn <- train(isActive~., data = bothsampled, method = "knn", 
+                   trControl = trainControl(method = "cv", number = 5))
+saveRDS(model_knn, "model_knn.rds")
+model_knn <- readRDS("model_knn.rds")
+plot(model_knn)
+
+# Evaluating
+predict_knn <- predict(model_knn, newdata = test_data)
+saveRDS(predict_knn, "predict_knn.rds")
+predict_knn <- readRDS("predict_knn.rds")
+predict_knn_prob <- predict(model_knn, test_data, "prob")
+
+# Attribute performance
+imp_attr_knn <- varImp(model_knn)
+plot(imp_attr_knn, main = "Variable Importance of K-NN")
+
+#Confusion matrix
+knn_cm <- table(test_data$isActive, predict_knn)
+confusionMatrix(knn_cm)
+
+#Looking at the predictions
+view(head(cbind(predict_knn, test_data), 20))
+
+library(pROC)
+multiclass.roc(test_data$isActive, predict_knn, plot=T, percent = TRUE)
+```
+
+# Hybrid Model
+```{r}
+bothsampled_hydrid <- bothsampled %>% mutate(isActive = ifelse(isActive == 1, "Active", "Inactive"))
+test_data_hydrid <- test_data %>% mutate(isActive = ifelse(isActive == 1, "Active", "Inactive"))
+
+model_hybrid <- caretList(isActive ~., data = bothsampled_hydrid, trControl = trainControl(method = "cv", number = 5, classProbs = TRUE),
+                          methodList = c("nb", "knn"))
+model_hybrid <- readRDS("model_hybrid.rds")
+
+output <- resamples(model_hybrid)
+summary(output)
+dotplot(output)
+
+stack <- caretStack(model_hybrid, method = "glm", trControl = trainControl(method = "cv", number = 5))
+
+predict_hybrid <- predict(stack, test_data)
+predict_hybrid <- readRDS("predict_hybrid.rds")
+
+# Confusion matrix
+hybrid_cm <- table(test_data_hydrid$isActive, predict_hybrid)
+confusionMatrix(hybrid_cm)
+```
+
+# Model Comparison
+```{r}
+results <- resamples(list(NAIVE = model_naive, KNN = model_knn, HYBRID_NAIVE = model_hybrid[[1]], HYBRID_KNN = model_hybrid[[2]]))
+
+scales <- list(x = list(relation = "free"), y = list(relation = "free"))
+
+bwplot(results, scales = scales)
+
+significances <- diff(results)
+summary(significances)
+```
+
+# Characteristics and Preferences of Active Users
+## Perspective 1
+```{r}
+data_for_clustering <- modelling_data_for_clusters %>% dplyr::select(c("province", "age", "type", "publishTime", "userRegisteredMonthCnt",
+                                                          "creatorRegisteredMonthCnt", "followCnt", "userGender", "isActive"))
+
+data_for_clustering <- data_for_clustering %>% mutate(type = ifelse(type == 1, "Image", "Video"))
+data_for_clustering <- data_for_clustering %>% mutate(userGender = ifelse(userGender == 1, "femaleUser", "maleUser"))
+data_for_clustering <- data_for_clustering %>% filter(isActive == 1)
+data_for_clustering$isActive <- NULL
+
+data_for_clustering <- data_for_clustering %>%
+  group_by(province, userGender, type) %>%
+  dplyr::summarise(age = mean(age),
+            publishTime = mean(publishTime),
+            userRegisteredMonthCnt = mean(userRegisteredMonthCnt),
+            creatorRegisteredMonthCnt = mean(creatorRegisteredMonthCnt),
+            followCnt = mean(followCnt)) %>%
+  tidyr::pivot_wider(names_from = province, values_from = c(age, publishTime, userRegisteredMonthCnt, creatorRegisteredMonthCnt, followCnt), 
+                     values_fill = 0)
+
+data_for_clustering <- data_for_clustering %>%
+  pivot_longer(1:2, names_to = "attribute", values_to = "value")
+
+data_for_clustering <- data_for_clustering %>% group_by(attribute, value) %>% dplyr::summarise(across(everything(), list(mean)))
+data_for_clustering$attribute <- paste0(data_for_clustering$attribute, data_for_clustering$value)
+data_for_clustering$value <- NULL
+data_for_clustering$attribute[which(data_for_clustering$attribute == "typeImage")] <- "Image"
+data_for_clustering$attribute[which(data_for_clustering$attribute == "typeVideo")] <- "Video"
+data_for_clustering$attribute[which(data_for_clustering$attribute == "userGenderfemaleUser")] <- "femaleUser"
+data_for_clustering$attribute[which(data_for_clustering$attribute == "userGendermaleUser")] <- "maleUser"
+data_for_clustering$attribute <- as.factor(data_for_clustering$attribute)
+data_for_clustering <- data_for_clustering %>% remove_rownames %>% column_to_rownames(var="attribute")
+
+# Scree plot for province
+wss <- 0
+
+set.seed(123)
+for(i in 1:3){
+  km.out <- kmeans(data_for_clustering, centers = i, nstart = 25)
+  wss[i] <- km.out$withinss
+
+  print(i)
+}
+
+plot(wss, type = "b", xlab = "Number of Clusters", ylab = "Within groups sum of squares", main = "Scree Plot for Type and User Genders Grouped By Province")
+
+set.seed(123)
+kmeans_all <- kmeans(data_for_clustering, centers = 2, nstart = 25)
+data_for_clustering <- as.data.frame(data_for_clustering)
+data_for_clustering$cluster <- kmeans_all$cluster
+
+fviz_cluster(kmeans_all, data = data_for_clustering)
+table(data_for_clustering$cluster)
+
+cluster_summary <- aggregate(data_for_clustering, by = list(cluster=kmeans_all$cluster), mean)
+cluster_summary <- round(cluster_summary, 0)
+cluster_summary <- cluster_summary %>%
+  pivot_longer(2:161, names_to = "province", values_to = "value")
+cluster_summary_age <- cluster_summary[c(1:32, 161:192),]
+cluster_summary_publishTime <- cluster_summary[c(33:64, 193:224),]
+cluster_summary_userRegisteredMonthCnt <- cluster_summary[c(65:96, 225:256),]
+cluster_summary_creatorRegisteredMonthCnt <- cluster_summary[c(97:128, 257:288),]
+cluster_summary_followCnt <- cluster_summary[c(129:160, 289:320),]
+
+age_lm <- lm(value ~ cluster, cluster_summary_age)
+age_emm <- emmeans(age_lm, ~ cluster)
+age_contrast <- confint(pairs(age_emm, reverse = TRUE))
+avg_age <- grid.arrange(ggplot(summary(age_emm), aes(y = emmean, x = cluster, ymin = lower.CL, ymax = upper.CL, color = cluster)) +
+                          geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                          labs(x = "Cluster", y = "Average Age", colour = "Cluster", title = "Average Ages for Each Cluster",
+                               subtitle = "Error bars are 95% CIs"),
+                        ggplot(age_contrast, aes(y = estimate, x = contrast, ymin = lower.CL, ymax = upper.CL)) +
+                          geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                          labs(x = "Cluster", y = "Average Age", colour = "Cluster", 
+                               title = "Difference Between the Average Ages for Each Cluster", subtitle = "Error bars are 95% CIs"))
+
+publishTime_lm <- lm(value ~ cluster, cluster_summary_publishTime)
+publishTime_emm <- emmeans(publishTime_lm, ~ cluster)
+publishTime_contrast <- confint(pairs(publishTime_emm, reverse = TRUE))
+avg_publishTime <- grid.arrange(ggplot(summary(publishTime_emm), 
+                                       aes(y = emmean, x = cluster, ymin = lower.CL, ymax = upper.CL, color = cluster)) +
+                                  geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                                  labs(x = "Cluster", y = "Average Publish Time", colour = "Cluster", 
+                                       title = "Average Publish Times for Each Cluster", subtitle = "Error bars are 95% CIs"),
+                                ggplot(publishTime_contrast, aes(y = estimate, x = contrast, ymin = lower.CL, ymax = upper.CL)) +
+                                  geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                                  labs(x = "Cluster", y = "Average Publish Time", colour = "Cluster", 
+                                  title = "Difference Between the Average Publish Times for Each Cluster", subtitle = "Error bars are 95% CIs"))
+
+userRegisteredMonthCnt_lm <- lm(value ~ cluster, cluster_summary_userRegisteredMonthCnt)
+userRegisteredMonthCnt_emm <- emmeans(userRegisteredMonthCnt_lm, ~ cluster)
+userRegisteredMonthCnt_contrast <- confint(pairs(userRegisteredMonthCnt_emm, reverse = TRUE))
+avg_userRegisteredMonthCnt <- grid.arrange(ggplot(summary(userRegisteredMonthCnt_emm), 
+                                                  aes(y = emmean, x = cluster, ymin = lower.CL, ymax = upper.CL, color = cluster)) +
+                                             geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                                             labs(x = "Cluster", y = "Average User Registered Month Count", colour = "Cluster", 
+                                             title = "Average User Registered Month Count for Each Cluster", subtitle = "Error bars are 95% CIs"),
+                                           ggplot(userRegisteredMonthCnt_contrast, 
+                                                  aes(y = estimate, x = contrast, ymin = lower.CL, ymax = upper.CL)) +
+                                             geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                                             labs(x = "Cluster", y = "Average User Registered Month Count", colour = "Cluster", 
+                                             title = "Difference Between the Average User Registered Month Counts for Each Cluster", 
+                                             subtitle = "Error bars are 95% CIs"))
+
+creatorRegisteredMonthCnt_lm <- lm(value ~ cluster, cluster_summary_creatorRegisteredMonthCnt)
+creatorRegisteredMonthCnt_emm <- emmeans(creatorRegisteredMonthCnt_lm, ~ cluster)
+creatorRegisteredMonthCnt_contrast <- confint(pairs(creatorRegisteredMonthCnt_emm, reverse = TRUE))
+avg_creatorRegisteredMonthCnt <- grid.arrange(ggplot(summary(creatorRegisteredMonthCnt_emm), 
+                                                  aes(y = emmean, x = cluster, ymin = lower.CL, ymax = upper.CL, color = cluster)) +
+                                             geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                                             labs(x = "Cluster", y = "Average Creator Registered Month Count", colour = "Cluster", 
+                                             title = "Average Creator Registered Month Count for Each Cluster", 
+                                             subtitle = "Error bars are 95% CIs"),
+                                           ggplot(creatorRegisteredMonthCnt_contrast, 
+                                                  aes(y = estimate, x = contrast, ymin = lower.CL, ymax = upper.CL)) +
+                                             geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                                             labs(x = "Cluster", y = "Average Creator Registered Month Count", colour = "Cluster", 
+                                             title = "Difference Between the Average Creator Registered Month Counts for Each Cluster", 
+                                             subtitle = "Error bars are 95% CIs"))
+
+followCnt_lm <- lm(value ~ cluster, cluster_summary_followCnt)
+followCnt_emm <- emmeans(followCnt_lm, ~ cluster)
+followCnt_contrast <- confint(pairs(followCnt_emm, reverse = TRUE))
+avg_followCnt <- grid.arrange(ggplot(summary(followCnt_emm), aes(y = emmean, x = cluster, ymin = lower.CL, ymax = upper.CL, color = cluster)) +
+                          geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                                             labs(x = "Cluster", y = "Average User Follow Count", colour = "Cluster", 
+                                             title = "Average User Follow Count for Each Cluster", 
+                                             subtitle = "Error bars are 95% CIs"),
+                        ggplot(followCnt_contrast, aes(y = estimate, x = contrast, ymin = lower.CL, ymax = upper.CL)) +
+                          geom_point() + geom_linerange() + geom_hline(yintercept = 0, lty = 2) +
+                                             labs(x = "Cluster", y = "Average User Follow Count", colour = "Cluster", 
+                                             title = "Difference Between the Average User Follow Counts for Each Cluster", 
+                                             subtitle = "Error bars are 95% CIs"))
+```
+
+## Perspective 2
+```{r}
+data_for_demo <- modelling_data_for_clusters %>% dplyr::select(c("province", "age", "type", "publishTime", "userRegisteredMonthCnt",
+                                                          "creatorRegisteredMonthCnt", "followCnt", "userGender", "isActive"))
+
+data_for_demo <- data_for_demo %>% filter(isActive == 1)
+data_for_demo$isActive <- NULL
+data_for_demo <- data_for_demo %>% mutate(type = ifelse(type == 1, "Image", "Video"))
+data_for_demo <- data_for_demo %>% mutate(userGender = ifelse(userGender == 1, "femaleUser", "maleUser"))
+
+data_for_demo <- data_for_demo %>%
+  group_by(province, userGender, type) %>%
+  dplyr::summarise(age = mean(age),
+            publishTime = mean(publishTime),
+            userRegisteredMonthCnt = mean(userRegisteredMonthCnt),
+            creatorRegisteredMonthCnt = mean(creatorRegisteredMonthCnt),
+            followCnt = mean(followCnt)) %>%
+  tidyr::pivot_wider(names_from = c(userGender, type), values_from = c(age, publishTime, userRegisteredMonthCnt, creatorRegisteredMonthCnt,
+                                                                       followCnt), 
+                     values_fill = 0)
+
+data_for_demo <- data_for_demo %>% remove_rownames %>% column_to_rownames(var="province")
+data_for_demo_scaled <- scale(data_for_demo)
+
+# Scree plot for remaining attributes
+wss <- 0
+
+set.seed(123)
+for(i in 1:20){
+  km.out <- kmeans(data_for_demo_scaled, centers = i, nstart = 25)
+  wss[i] <- km.out$withinss
+
+  print(i)
+}
+
+plot(wss, type = "b", xlab = "Number of Clusters", ylab = "Within groups sum of squares", main = "Scree Plot for Clustering Provinces")
+
+set.seed(123)
+kmeans_demo <- kmeans(data_for_demo, centers = 4, nstart = 25)
+data_for_demo$cluster <- kmeans_demo$cluster
+
+fviz_cluster(kmeans_demo, data = data_for_demo)
+table(data_for_demo$cluster)
+summary_demo <- aggregate(data_for_demo, by = list(cluster = kmeans_demo$cluster), mean)
+summary_demo <- round(summary_demo, 0)
+```   
+
+# R Package Citations
+```{r}
+citation("RSQLite")
+citation("dplyr")
+citation("tidyverse")
+citation("data.table")
+citation("emmeans")
+citation("stringR")
+citation("gridExtra")
+citation("MASS")
+citation("mice")
+citation("mltools")
+citation("FactoMineR")
+citation("plyr")
+citation("ROSE")
+citation("corrplot")
+citation("ppclust")
+citation("cluster")
+citation("flashClust")
+citation("factoextra")
+citation("FSelector")
+citation("caTools")
+citation("e1071")
+citation("caret")
+citation("caretEnsemble")
+citation("Amelia")
+citation("Hmisc")
+citation("stargazer")
+citation("utils")
+```
